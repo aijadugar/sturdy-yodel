@@ -1,0 +1,119 @@
+ fastapi
+ uvicorn
+ librosa
+ langgraph
+ langchain-google-genai
+ ddgs
+ huggingface-hub
+ torch
+ ffmpeg-python
+
+
+
+
+import io
+import random
+import librosa
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from agents.assistant_agent import assistant_agent
+
+app=FastAPI(title="Lockdown: Tuberculosis Screening via Cough Sound Analysis")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+class TBRequest(BaseModel):
+    age: int 
+    cough_days: int
+    fever: bool
+    smoker: bool
+class TBResponse(BaseModel):
+    risk_score: float
+    risk_level: str
+class AssistentRequest(BaseModel):
+    risk_level: str
+    user_location: str
+    user_query: str | None=None
+
+@app.get('/')
+def lockdown():
+    return {
+        "status": "CoughLock backend is building..."
+    }
+
+@app.websocket("/ws/audio")
+async def websocket_audio(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            message = await websocket.receive()
+            
+            if "bytes" in message:
+                audio_bytes = message["bytes"]
+            elif "text" in message:
+                print(f"Warning: Received text data: {message['text'][:50]}...")
+                continue
+            elif message.get("type") == "websocket.disconnect":
+                break
+            else:
+                print(f"Unknown message type: {message}")
+                continue
+
+            try:
+                audio, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True)
+                
+                mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=128)
+                log_mel = librosa.power_to_db(mel_spec)
+                
+                await websocket.send_json({
+                    "confidence": round(random.uniform(0.3, 0.95), 2),
+                    "label": "Low Risk",
+                    "spectrogram_shape": list(log_mel.shape)
+                })
+            except Exception as e:
+                print(f"Processing error: {e}")
+                await websocket.send_json({"error": "Processing failed"})
+
+    except Exception as e:
+        print(f"Top-level WebSocket error: {e}")
+    finally:
+        print("Closing connection.")
+
+@app.post('/api/predict', response_model=TBResponse)
+async def predict_tb(data: TBRequest):
+    risk_score=round(random.uniform(0.2, 0.95), 2)
+    if risk_score > 0.7:
+        risk_level="High Level"
+    elif risk_score>0.4:
+        risk_level="Medium Level"
+    else:
+        risk_level="Low Level"
+    
+    return {
+        "risk_score": risk_score,
+        "risk_level": risk_level
+    }
+
+@app.post("/assistant")
+async def assistant(req: AssistentRequest):
+    state={
+        "risk_level": req.risk_level.upper(),
+        "user_location": req.user_location,
+        "user_query": req.user_query
+    }
+
+    results=assistant_agent.invoke(state)
+    return {
+        "response": results["final"]
+    }
+
+
+
